@@ -52,17 +52,24 @@ enum editorKey{ // using int type with a high value to avoid confussion with cha
 
 enum editorHighlight{
     HL_NORMAL=0,
+    HL_COMMENT,
+    HL_KEYWORD1,
+    HL_KEYWORD2,
+    HL_STRING,
     HL_NUMBER,
     HL_MATCH
 };
 
 #define HL_HIGHLIGHT_NUMBERS (1<<0)
+#define HL_HIGHLIGHT_STRING (1<<1)
 
 /*data*/
 
 struct editorSyntax{ //--used for highlighting
     char *filetype;
     char **filematch;
+    char **keywords;
+    char *singleline_comment_start;
     int flags;
 };
 
@@ -96,11 +103,20 @@ struct editorConfig E;
 
 char *C_HL_extensions[] = {".c", ".cpp", ".h", NULL};
 
+char *C_HL_keywords[]={
+    "switch", "if", "while", "for", "break", "continue", "return", "else",
+    "struct", "union", "typedef", "static", "enum", "class", "case",
+    
+    "int|", "long|", "double|", "float|", "char|", "unsigned|", "signed|", "void|", NULL
+};
+
 struct editorSyntax HDLB[] = { //--hl database for C language
     {
         "c", //filetype
         C_HL_extensions, //the extensions
-        HL_HIGHLIGHT_NUMBERS //flag field
+        C_HL_keywords,
+        "//",
+        HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRING //flag field
     },
 };
 
@@ -250,12 +266,53 @@ void editorUpdateSyntax(erow *row){
     
     if(E.syntax == NULL) return;
     
+    char **keywords = E.syntax->keywords; //alias
+    
+    char *scs = E.syntax->singleline_comment_start; //alias
+    int scs_len= scs? strlen(scs) : 0;
+    
     int prev_step=1; //--the begginig of a line is a separator
+    int in_string=0;
     
     int i=0;
     while(i<row->rsize){
         char c=row->render[i];
         unsigned char prev_hl = (i>0)? row->hl[i-1] : HL_NORMAL;
+        
+        //--decide if we should hl single-line comments and also check if we re not in a string
+        if(scs_len && !in_string){
+            if(!strncmp(&row->render[i], scs, scs_len)){
+                memset(&row->hl[i], HL_COMMENT, row->rsize-1);
+                break;
+            }
+        }
+        
+        if(E.syntax->flags & HL_HIGHLIGHT_STRING){
+            //--if set, the current character can be hl with HL_STRING
+            //if not, check if we're at the beggining of a string by checking single/double quote
+            if(in_string){
+                //--if we're in a string and the current ch is a backslach \ and
+                //there is at least one more ch line afte \, we highlight the ch that comes afte \.
+                row->hl[i]=HL_STRING;
+                if(c=='\\' && i+1<row->rsize){
+                    row->hl[i+1] =HL_STRING;
+                    i+=2;
+                    continue;
+                }
+                //--if the current character is closing quote, reset the in_string
+                if(c==in_string) in_string=0;
+                i++;//--consume the character
+                prev_step = 1; //--closing character is considered a separator
+                continue;
+            }else{
+                if(c=='"' || c=='\''){
+                    in_string = c;
+                    row->hl[i]=HL_STRING;
+                    i++;
+                    continue;
+                }
+            }
+        }
         
         //--check if the numbers should be hl in this text
         if(E.syntax->flags & HL_HIGHLIGHT_NUMBERS){
@@ -269,6 +326,31 @@ void editorUpdateSyntax(erow *row){
                 continue;
             }
         }
+        
+        //--only if a separator came before, then we can consider a data type
+        if(prev_step){
+            int j;
+            for(j=0; keywords[j]; j++){
+                int klen = strlen(keywords[j]);
+                int kw2 = keywords[j][klen-1]=='|';
+                if(kw2) klen--;
+                
+                //--check if a keyword exists at our position in the text and we check
+                //to see if a separator character comes after the keyword
+                if(!strncmp(&row->render[i], keywords[j], klen) &&
+                   is_separator(row->render[i+klen])){
+                    //--passed, meaning that we have a word to hl
+                    memset(&row->hl[i], kw2 ? HL_KEYWORD2 : HL_KEYWORD1, klen);
+                    i+=klen; //--consume the entire keyword
+                    break;
+                }
+            }
+            if(keywords[j]!=NULL){
+                prev_step=0;
+                continue; //if the for loop broke
+            }
+        }
+        
         prev_step=is_separator(c);
         i++;
     }
@@ -276,6 +358,14 @@ void editorUpdateSyntax(erow *row){
 
 int editorSyntaxToColor(int hl){
     switch (hl) {
+        case HL_COMMENT:
+            return 36; //--cyan
+        case HL_KEYWORD1:
+            return 33; //--yellow
+        case HL_KEYWORD2:
+            return 32; //--green
+        case HL_STRING:
+            return 35; //--magneta
         case HL_NUMBER:
             return 31;
         case HL_MATCH:
@@ -302,7 +392,7 @@ void editorSelectSyntaxHighlight(){
                (!is_ext && strstr(E.filename, s->filematch[i]))){
                 E.syntax = s;
                 
-                //--the hl immediately changes when the filetype changes 
+                //--the hl immediately changes when the filetype changes
                 int filerow;
                 for(filerow=0; filerow< E.numrows; filerow++){
                     editorUpdateSyntax(&E.row[filerow]);
