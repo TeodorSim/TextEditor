@@ -53,6 +53,7 @@ enum editorKey{ // using int type with a high value to avoid confussion with cha
 enum editorHighlight{
     HL_NORMAL=0,
     HL_COMMENT,
+    HL_MLCOMMENT,
     HL_KEYWORD1,
     HL_KEYWORD2,
     HL_STRING,
@@ -70,15 +71,19 @@ struct editorSyntax{ //--used for highlighting
     char **filematch;
     char **keywords;
     char *singleline_comment_start;
+    char *multiline_comment_start;
+    char *multiline_comment_end;
     int flags;
 };
 
 typedef struct erow{ //editor row -> storest a line of text as a pointer to the dynamically-allocated character data and length.
+    int idx;
     int size;
     int rsize;
     char *chars;
     char *render;
     unsigned char *hl;
+    int hl_open_comment;
 }erow;
 
 struct editorConfig{ //--global editor struct
@@ -115,7 +120,7 @@ struct editorSyntax HDLB[] = { //--hl database for C language
         "c", //filetype
         C_HL_extensions, //the extensions
         C_HL_keywords,
-        "//",
+        "//", "/*", "*/",
         HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRING //flag field
     },
 };
@@ -269,10 +274,16 @@ void editorUpdateSyntax(erow *row){
     char **keywords = E.syntax->keywords; //alias
     
     char *scs = E.syntax->singleline_comment_start; //alias
-    int scs_len= scs? strlen(scs) : 0;
+    char *mcs =E.syntax->multiline_comment_start;
+    char *mce =E.syntax->multiline_comment_end;
+    
+    int scs_len= scs ? strlen(scs) : 0;
+    int mcs_len= mcs ? strlen(mcs) : 0;
+    int mce_len= mce ? strlen(mce) : 0;
     
     int prev_step=1; //--the begginig of a line is a separator
     int in_string=0;
+    int in_comment=(row->idx >0 && E.row[row->idx-1].hl_open_comment);//--boolean to keep track if we are in a multiline comment. True if the previous line has unclosed multiline comment
     
     int i=0;
     while(i<row->rsize){
@@ -280,10 +291,36 @@ void editorUpdateSyntax(erow *row){
         unsigned char prev_hl = (i>0)? row->hl[i-1] : HL_NORMAL;
         
         //--decide if we should hl single-line comments and also check if we re not in a string
-        if(scs_len && !in_string){
+        if(scs_len && !in_string && !in_comment){
             if(!strncmp(&row->render[i], scs, scs_len)){
                 memset(&row->hl[i], HL_COMMENT, row->rsize-1);
                 break;
+            }
+        }
+        
+        //--both should be non NULL to hl a multicomment. Is necessary to not be in a string
+        if(mcs_len && mce_len && !in_string){
+            if(in_comment){
+                //--if we're inside a multiline comment, just hl the content
+                row->hl[i] = HL_MLCOMMENT;
+                //--checking the final state of the multiline comment
+                if(!strncmp(&row->render[i], mce, mce_len)){
+                    //--if so, hl the whole mce stirng
+                    memset(&row->hl[i], HL_MLCOMMENT, mce_len);
+                    i+=mce_len; //--consume it
+                    in_comment=0;
+                    prev_step=1;
+                    continue;
+                }else{ //--if we're not at the end, simply consume the current character
+                    i++;
+                    continue;
+                }
+            }else if(!strncmp(&row->render[i], mcs, mcs_len)){
+                //--we're at the start of a multiline comment
+                memset(&row->render[i], HL_MLCOMMENT, mcs_len);
+                i+=mcs_len;
+                in_comment=1;
+                continue;
             }
         }
         
@@ -354,11 +391,18 @@ void editorUpdateSyntax(erow *row){
         prev_step=is_separator(c);
         i++;
     }
+    
+    int changed =(row->hl_open_comment != in_comment);
+    row->hl_open_comment = in_comment; //--tells if the row ended as an unclosed multiline comment or not
+    //--if there is a next line and the state of hl_open_comment changed, call again
+    if(changed && row->idx+1 < E.numrows)
+        editorUpdateSyntax(&E.row[row->idx+1]);
 }
 
 int editorSyntaxToColor(int hl){
     switch (hl) {
         case HL_COMMENT:
+        case HL_MLCOMMENT:
             return 36; //--cyan
         case HL_KEYWORD1:
             return 33; //--yellow
@@ -463,6 +507,9 @@ void editorInsertRow(int at, char *s, size_t len){
     
     E.row = realloc(E.row, sizeof(erow)*(E.numrows+1));
     memmove(&E.row[at+1], &E.row[at], sizeof(erow)*(E.numrows-at));
+    for(int j=at+1; j<E.numrows; j++) E.row[j].idx++;
+    
+    E.row[at].idx=at; //--initialize to the rows index in the file at the time is inserted
     
     E.row[at].size = len;
     E.row[at].chars = malloc(len+1);
@@ -472,6 +519,7 @@ void editorInsertRow(int at, char *s, size_t len){
     E.row[at].rsize=0;
     E.row[at].render=NULL;
     E.row[at].hl=NULL;
+    E.row[at].hl_open_comment=0;
     editorUpdateRow(&E.row[at]);
     
     E.numrows++;
@@ -488,6 +536,7 @@ void editorDelRow(int at){
     if(at<0 || at>=E.numrows) return;
     editorFreeRow(&E.row[at]);
     memmove(&E.row[at], &E.row[at+1], sizeof(erow)*(E.numrows-at-1));
+    for(int j=at; j<E.numrows-1; j++) E.row[j].idx--;
     E.numrows--;
     E.dirty++;
 }
